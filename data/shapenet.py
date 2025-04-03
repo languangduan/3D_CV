@@ -11,6 +11,7 @@ import shutil
 from tqdm import tqdm
 
 
+
 class ShapeNetDataset(Dataset):
     # ShapeNet类别ID到名称的映射
     CATEGORY_MAP = {
@@ -29,17 +30,32 @@ class ShapeNetDataset(Dataset):
         '04530566': 'vessel'
     }
 
-    def __init__(self, root_dir=None, categories=['02691156'], split='train',
-                 img_size=256, num_views=24, use_depth=True,
-                 samples_per_category=None, download=True):
+    # 添加类别描述，用于CLIP文本编码
+    CATEGORY_DESCRIPTIONS = {
+        '02691156': ['a 3D airplane', 'a model of an airplane', 'a rendering of an airplane'],
+        '02828884': ['a 3D bench', 'a model of a bench', 'a rendering of a bench'],
+        '02933112': ['a 3D cabinet', 'a model of a cabinet', 'a rendering of a cabinet'],
+        '02958343': ['a 3D car', 'a model of a car', 'a rendering of a car'],
+        '03001627': ['a 3D chair', 'a model of a chair', 'a rendering of a chair'],
+        '03211117': ['a 3D display', 'a model of a display', 'a rendering of a display'],
+        '03636649': ['a 3D lamp', 'a model of a lamp', 'a rendering of a lamp'],
+        '03691459': ['a 3D speaker', 'a model of a speaker', 'a rendering of a speaker'],
+        '04090263': ['a 3D rifle', 'a model of a rifle', 'a rendering of a rifle'],
+        '04256520': ['a 3D sofa', 'a model of a sofa', 'a rendering of a sofa'],
+        '04379243': ['a 3D table', 'a model of a table', 'a rendering of a table'],
+        '04401088': ['a 3D telephone', 'a model of a telephone', 'a rendering of a telephone'],
+        '04530566': ['a 3D vessel', 'a model of a vessel', 'a rendering of a vessel']
+    }
+
+    def __init__(self, root_dir=None, transform=None, categories=['02691156'], split='train',
+                 img_size=256, use_depth=True, samples_per_category=None, download=True):
         """
-        增强版ShapeNet数据集加载器
+        单视角ShapeNet数据集加载器
         Args:
             root_dir: ShapeNet根目录，如果为None则使用默认路径
             categories: 类别ID列表或类别名称列表
             split: 数据集划分 (train/val/test)
             img_size: 输出图像尺寸
-            num_views: 每个物体加载的视角数
             use_depth: 是否加载深度图
             samples_per_category: 每个类别采样的实例数量，None表示使用全部
             download: 是否自动下载数据集
@@ -53,40 +69,65 @@ class ShapeNetDataset(Dataset):
         self.categories = self._process_categories(categories)
 
         self.img_size = img_size
-        self.num_views = num_views
         self.use_depth = use_depth
         self.samples_per_category = samples_per_category
+        self.split = split
 
         # 如果需要，下载数据集
         if download:
             self._download_dataset()
 
         # 数据增强
-        self.transform = transforms.Compose([
-            transforms.Resize(img_size),
-            transforms.CenterCrop(img_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-        ])
+        if transform is None:
+            self.transform = transforms.Compose([
+                transforms.Resize(img_size),
+                transforms.CenterCrop(img_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+            ])
+        else:
+            self.transform = transform
 
-        # 加载数据路径
-        self.samples = self._load_samples(split)
+        # 加载所有样本和视角
+        self.all_samples = []
+        raw_samples = self._load_samples(split)
+
+        # 展开样本和视角
+        for sample in raw_samples:
+            for img_file in sample['image_files']:
+                self.all_samples.append({
+                    'sample': sample,
+                    'img_file': img_file
+                })
 
     def _process_categories(self, categories):
-        """处理类别输入，支持ID或名称"""
+        """处理类别输入，支持ID和名称"""
         processed_categories = []
         for cat in categories:
-            if cat in self.CATEGORY_MAP:  # 是类别ID
+            if cat in self.CATEGORY_MAP.keys():
+                # 已经是类别ID
                 processed_categories.append(cat)
-            else:  # 假设是类别名称
-                for id_, name in self.CATEGORY_MAP.items():
-                    if name.lower() == cat.lower():
-                        processed_categories.append(id_)
+            else:
+                # 是类别名称，转换为ID
+                for cat_id, cat_name in self.CATEGORY_MAP.items():
+                    if cat_name == cat:
+                        processed_categories.append(cat_id)
                         break
-        if not processed_categories:
-            raise ValueError(f"No valid categories found in {categories}")
         return processed_categories
+
+    def _process_image(self, img_path):
+        """处理图像文件"""
+        try:
+            img = Image.open(img_path).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            return img
+        except Exception as e:
+            print(f"Error loading image {img_path}: {e}")
+            # 返回一个空白图像作为替代
+            return torch.zeros(3, self.img_size, self.img_size)
+
 
     def _download_dataset(self):
         """下载并解压数据集"""
@@ -177,32 +218,48 @@ class ShapeNetDataset(Dataset):
 
         return samples
 
+    def __len__(self):
+        """返回数据集大小"""
+        return len(self.all_samples)
+
     def __getitem__(self, idx):
-        """更新数据加载逻辑以匹配新的目录结构"""
-        sample = self.samples[idx]
+        """获取单个视角的样本"""
+        item = self.all_samples[idx]
+        sample = item['sample']
+        img_file = item['img_file']
 
-        # 随机选择视角
-        num_views = min(self.num_views, len(sample['image_files']))
-        selected_files = np.random.choice(sample['image_files'], num_views, replace=False)
+        # 加载RGB图像
+        img_path = os.path.join(sample['screenshots_dir'], img_file)
+        img = self._process_image(img_path)
 
-        images = []
-        for img_file in selected_files:
-            # 加载RGB图像
-            img_path = os.path.join(sample['screenshots_dir'], img_file)
-            img = self._process_image(img_path)
-            images.append(img)
+        # 生成伪深度图（如果需要）
+        if self.use_depth:
+            # 这里我们生成一个简单的伪深度图
+            depth = torch.ones(1, self.img_size, self.img_size) * 0.5
+        else:
+            depth = torch.zeros(1, self.img_size, self.img_size)
 
+        # 为了CLIP损失，生成文本描述
+        category_id = sample['category_id']
+        if category_id in self.CATEGORY_DESCRIPTIONS:
+            # 随机选择一个描述
+            text_description = np.random.choice(self.CATEGORY_DESCRIPTIONS[category_id])
+        else:
+            text_description = f"a 3D {sample['category_name']}"
+
+        # 构建返回字典
         data_dict = {
-            'images': torch.stack(images),
+            'image': img,  # [3, H, W]
             'category': sample['category_id'],
             'category_name': sample['category_name'],
-            'instance_id': sample['instance_id']
+            'instance_id': sample['instance_id'],
+            'text': text_description,
+            'model_path': sample['model_path'],
+            'depth': depth,  # [1, H, W]
+            'mesh': torch.zeros(1, dtype=torch.float32)  # 占位符
         }
 
         return data_dict
-
-    def __len__(self):
-        return len(self.samples)
 
 
     def _load_depth(self, path):

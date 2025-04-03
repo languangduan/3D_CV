@@ -4,6 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import resnet50
 
+from models.implicit_field import ImplicitField
+from models.renderer import VolumeRenderer
+
 
 class SingleViewReconstructor(nn.Module):
     def __init__(self, cfg):

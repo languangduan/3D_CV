@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from losses.edge_aware_loss import EdgeAwareLoss
+
 
 class CombinedLoss(nn.Module):
     def __init__(self, cfg):

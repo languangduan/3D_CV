@@ -1,4 +1,6 @@
 # train.py
+from types import SimpleNamespace
+
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -9,6 +11,7 @@ from models.base_model import SingleViewReconstructor
 from models.clip_encoder import CLIPEncoder
 from losses.combined_loss import CombinedLoss
 from data.shapenet import ShapeNetDataset
+from utils.aug import DataAugmentation
 
 
 class CLIPNeRFTrainer(pl.LightningModule):
@@ -28,8 +31,18 @@ class CLIPNeRFTrainer(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        # 提取批次数据
-        images = batch['image']
+        # 检查batch中的键
+        batch_keys = batch.keys()
+
+        # 根据实际键名获取图像
+        if 'image' in batch_keys:
+            images = batch['image']
+        elif 'images' in batch_keys:  # 可能是复数形式
+            images = batch['images']
+        else:
+            # 如果没有找到图像键，打印所有可用的键并抛出错误
+            print(f"可用的键: {batch_keys}")
+            raise KeyError("在batch中找不到图像数据，请检查数据加载器返回的字典键名")
         text = batch['text']
         gt_depth = batch.get('depth')
         gt_mesh = batch.get('mesh')
@@ -163,7 +176,7 @@ class CLIPNeRFTrainer(pl.LightningModule):
     def train_dataloader(self):
         # 创建ShapeNet数据集
         dataset = ShapeNetDataset(
-            root=self.cfg.data_root,
+            root_dir=self.cfg.data_root,
             split='train',
             categories=self.cfg.categories,
             transform=self.cfg.transform
@@ -184,12 +197,14 @@ class CLIPNeRFTrainer(pl.LightningModule):
 # 主函数
 def main():
     # 配置参数
-    cfg = {
-        'data_root': './data/shapenet',
-        'categories': ['chair', 'table', 'car'],
+    transform = DataAugmentation()
+    cfg = SimpleNamespace(**{
+        'data_root': None,
+        'categories': ['airplane'],
         'batch_size': 16,
         'num_workers': 4,
         'lr': 1e-4,
+        'transform':None,
         'max_epochs': 100,
         'lambda_depth': 0.5,
         'lambda_clip': 0.3,
@@ -199,7 +214,7 @@ def main():
         'beta_grad': 0.05,
         'temperature': 0.07,
         'clip_model': 'ViT-B/32'
-    }
+    })
 
     # 创建训练器
     trainer = CLIPNeRFTrainer(cfg)
