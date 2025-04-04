@@ -33,9 +33,28 @@ class VolumeRenderer(nn.Module):
 
         # 使用PyTorch3D的cubify将体素转换为网格
         meshes = []
+        verts_list = []
+        faces_list = []
+
         for i in range(B):
             mesh = cubify(voxels[i:i + 1], self.threshold)
-            meshes.append(mesh)
 
-        return Meshes.from_list([m.verts_list()[0] for m in meshes],
-                                [m.faces_list()[0] for m in meshes])
+            # 检查mesh是否为空
+            if len(mesh.verts_list()) > 0 and len(mesh.faces_list()) > 0:
+                verts = mesh.verts_list()[0]
+                faces = mesh.faces_list()[0]
+                verts_list.append(verts)
+                faces_list.append(faces)
+            else:
+                # 创建一个小的默认网格（单个三角形）以避免空网格
+                default_verts = torch.tensor([
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.0]
+                ], device=points.device)
+                default_faces = torch.tensor([[0, 1, 2]], device=points.device, dtype=torch.long)
+                verts_list.append(default_verts)
+                faces_list.append(default_faces)
+
+        # 使用正确的构造方法创建Meshes对象
+        return Meshes(verts=verts_list, faces=faces_list)

@@ -1,8 +1,10 @@
 import os
 import json
 import numpy as np
+import trimesh
 from PIL import Image
 import torch
+from pytorch3d.structures import Meshes
 from torch.utils.data import Dataset
 from torchvision import transforms
 import kagglehub
@@ -47,8 +49,11 @@ class ShapeNetDataset(Dataset):
         '04530566': ['a 3D vessel', 'a model of a vessel', 'a rendering of a vessel']
     }
 
-    def __init__(self, root_dir=None, transform=None, categories=['02691156'], split='train',
-                 img_size=256, use_depth=True, samples_per_category=None, download=True):
+    def __init__(self, root_dir=None, transform=None, categories=['02691156'],
+                 split='train', img_size=256, use_depth=True,
+                 samples_per_category=None, download=True,
+                 load_meshes=True, num_points=2048):
+
         """
         单视角ShapeNet数据集加载器
         Args:
@@ -59,11 +64,13 @@ class ShapeNetDataset(Dataset):
             use_depth: 是否加载深度图
             samples_per_category: 每个类别采样的实例数量，None表示使用全部
             download: 是否自动下载数据集
+            load_meshes: 是否加载PLY网格文件
         """
         # 设置默认路径
         if root_dir is None:
             root_dir = os.path.expanduser('~/datasets/shapenet')
         self.root = root_dir
+        self.load_meshes = load_meshes
 
         # 处理类别输入（支持ID或名称）
         self.categories = self._process_categories(categories)
@@ -101,6 +108,10 @@ class ShapeNetDataset(Dataset):
                     'img_file': img_file
                 })
 
+        # 原有的初始化代码...
+        self.num_points = num_points
+        self.point_cache = {}  # 添加点云缓存
+
     def _process_categories(self, categories):
         """处理类别输入，支持ID和名称"""
         processed_categories = []
@@ -116,6 +127,89 @@ class ShapeNetDataset(Dataset):
                         break
         return processed_categories
 
+    def _load_samples(self, split):
+        """加载数据样本，适配新的目录结构"""
+        samples = []
+        for cat_id in self.categories:
+            cat_samples = []
+            cat_dir = os.path.join(self.root, 'ShapeNetCore.v2', 'ShapeNetCore.v2', cat_id)
+
+            print(f"\nDebug - Checking category directory: {cat_dir}")
+
+            if not os.path.exists(cat_dir):
+                print(f"Warning: Category directory {cat_dir} not found")
+                continue
+
+            # 直接列出类别目录下的所有实例目录
+            instance_dirs = [d for d in os.listdir(cat_dir)
+                             if os.path.isdir(os.path.join(cat_dir, d))]
+            print(f"Debug - Found {len(instance_dirs)} instance directories")
+
+            # 应用采样限制
+            if self.samples_per_category is not None:
+                if len(instance_dirs) > self.samples_per_category:
+                    instance_dirs = np.random.choice(
+                        instance_dirs,
+                        self.samples_per_category,
+                        replace=False
+                    ).tolist()
+
+            for instance_id in tqdm(instance_dirs, desc=f"Loading {self.CATEGORY_MAP[cat_id]}"):
+                # 更新screenshots目录的路径
+                screenshots_dir = os.path.join(cat_dir, instance_id, 'screenshots')
+
+                # 更新模型文件路径为PLY文件
+                model_path = os.path.join(cat_dir, instance_id, 'models', 'model_normalized.ply')
+
+                if os.path.exists(screenshots_dir):
+                    # 获取所有png文件
+                    image_files = sorted([f for f in os.listdir(screenshots_dir)
+                                          if f.endswith('.png')])
+
+                    if image_files:  # 如果有图片文件
+                        cat_samples.append({
+                            'instance_id': instance_id,
+                            'category_id': cat_id,
+                            'category_name': self.CATEGORY_MAP[cat_id],
+                            'screenshots_dir': screenshots_dir,
+                            'image_files': image_files,
+                            'model_path': model_path
+                        })
+                else:
+                    print(f"Debug - Screenshots directory not found: {screenshots_dir}")
+
+            samples.extend(cat_samples)
+            print(f"Loaded {len(cat_samples)} samples for category {self.CATEGORY_MAP[cat_id]}")
+
+        if len(samples) == 0:
+            raise RuntimeError("No samples found in the dataset! Please check the data directory structure.")
+
+        return samples
+
+    def _load_mesh(self, model_path):
+        """加载PLY模型文件"""
+        if not self.load_meshes or not os.path.exists(model_path):
+            print(f"Mesh file not found: {model_path}")
+            return None
+
+        try:
+            # 方法1：使用trimesh加载PLY文件
+            mesh = trimesh.load(model_path)
+            verts = torch.tensor(mesh.vertices, dtype=torch.float32)
+            faces = torch.tensor(mesh.faces, dtype=torch.long)
+
+            # 创建PyTorch3D的Meshes对象
+            pytorch3d_mesh = Meshes(verts=[verts], faces=[faces])
+            return pytorch3d_mesh
+
+            # 方法2：直接使用PyTorch3D的IO加载PLY文件
+            # pytorch3d_mesh = IO().load_mesh(model_path)
+            # return pytorch3d_mesh
+
+        except Exception as e:
+            print(f"Error loading mesh from {model_path}: {e}")
+            return None
+
     def _process_image(self, img_path):
         """处理图像文件"""
         try:
@@ -127,7 +221,6 @@ class ShapeNetDataset(Dataset):
             print(f"Error loading image {img_path}: {e}")
             # 返回一个空白图像作为替代
             return torch.zeros(3, self.img_size, self.img_size)
-
 
     def _download_dataset(self):
         """下载并解压数据集"""
@@ -163,7 +256,7 @@ class ShapeNetDataset(Dataset):
             print(f"Error downloading dataset: {str(e)}")
             raise
 
-    def _load_samples(self, split):
+    def _load_samples_(self, split):
         """加载数据样本，适配新的目录结构"""
         samples = []
         for cat_id in self.categories:
@@ -227,40 +320,44 @@ class ShapeNetDataset(Dataset):
         item = self.all_samples[idx]
         sample = item['sample']
         img_file = item['img_file']
+        model_path = sample['model_path']
 
         # 加载RGB图像
         img_path = os.path.join(sample['screenshots_dir'], img_file)
         img = self._process_image(img_path)
 
-        # 生成伪深度图（如果需要）
-        if self.use_depth:
-            # 这里我们生成一个简单的伪深度图
-            depth = torch.ones(1, self.img_size, self.img_size) * 0.5
+        # 加载或生成点云
+        if model_path in self.point_cache:
+            points = self.point_cache[model_path]
         else:
-            depth = torch.zeros(1, self.img_size, self.img_size)
-
-        # 为了CLIP损失，生成文本描述
-        category_id = sample['category_id']
-        if category_id in self.CATEGORY_DESCRIPTIONS:
-            # 随机选择一个描述
-            text_description = np.random.choice(self.CATEGORY_DESCRIPTIONS[category_id])
-        else:
-            text_description = f"a 3D {sample['category_name']}"
+            try:
+                mesh = trimesh.load(model_path)
+                points = self._sample_points_from_mesh(mesh, self.num_points)
+                # 缓存点云数据
+                self.point_cache[model_path] = points
+            except Exception as e:
+                print(f"Error loading mesh from {model_path}: {e}")
+                points = torch.zeros((self.num_points, 3), dtype=torch.float32)
 
         # 构建返回字典
         data_dict = {
-            'image': img,  # [3, H, W]
+            'image': img,
+            'points': points,  # 添加点云数据
             'category': sample['category_id'],
             'category_name': sample['category_name'],
             'instance_id': sample['instance_id'],
-            'text': text_description,
-            'model_path': sample['model_path'],
-            'depth': depth,  # [1, H, W]
-            'mesh': torch.zeros(1, dtype=torch.float32)  # 占位符
+            'text': np.random.choice(self.CATEGORY_DESCRIPTIONS[sample['category_id']]),
+            'model_path': model_path,
+            'depth': torch.ones(1, self.img_size, self.img_size) * 0.5 if self.use_depth else torch.zeros(1,
+                                                                                                          self.img_size,
+                                                                                                          self.img_size)
         }
 
         return data_dict
 
+    def clear_cache(self):
+        """清理点云缓存"""
+        self.point_cache.clear()
 
     def _load_depth(self, path):
         """加载深度图并归一化到[0,1]"""
@@ -286,6 +383,29 @@ class ShapeNetDataset(Dataset):
         # 合成完整投影矩阵
         proj_matrix = K @ ext
         return proj_matrix
+
+    def _sample_points_from_mesh(self, mesh, num_points=2048):
+        try:
+            points = mesh.sample(num_points)
+            points = torch.tensor(points, dtype=torch.float32)
+
+            # 添加数值稳定性检查
+            center = points.mean(dim=0)
+            points = points - center
+
+            # 防止除零
+            scale = points.abs().max().item()
+            scale = max(scale, 1e-6)  # 添加epsilon
+            points = points / scale
+
+            # 添加验证
+            assert not torch.isnan(points).any(), "NaN detected in points"
+            assert not torch.isinf(points).any(), "Inf detected in points"
+
+            return points
+        except Exception as e:
+            print(f"Error sampling points: {e}")
+            return torch.randn((num_points, 3), dtype=torch.float32) * 0.1  # 返回随机点云而不是零
 
     def get_category_statistics(self):
         """获取数据集类别统计信息"""
