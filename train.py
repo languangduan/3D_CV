@@ -436,7 +436,7 @@ def main():
         precision=32,  # 使用 16 位混合精度训练
         gradient_clip_val=1.0,  # 在训练器级别设置梯度裁剪
         max_epochs=cfg.max_epochs,
-        gpus=1,
+        gpus=2,
         callbacks=[checkpoint_callback],
         logger=logger,
     )
