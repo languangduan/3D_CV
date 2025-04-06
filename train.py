@@ -12,7 +12,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 from models.base_model import SingleViewReconstructor
 from models.clip_encoder import CLIPEncoder
-from losses.combined_loss import CombinedLoss, chamfer_distance_loss
+from losses.combined_loss import CombinedLoss
 from data.shapenet import ShapeNetDataset
 from utils.aug import DataAugmentation
 
@@ -330,18 +330,25 @@ class CLIPNeRFTrainer(pl.LightningModule):
     def generate_mesh(self, images, is_training=None):
         """
         从图像生成3D表示
-        Args:
-            images: 输入图像批次 [B, 3, H, W]
-            is_training: 是否处于训练模式
         """
         if is_training is None:
             is_training = self.training
 
-        # 获取模型输出
-        points, densities = self.model(images)
+        # 获取多尺度特征
+        features_list = self.model.extract_features(images)
+
+        # 融合特征
+        fused_features, _ = self.model.implicit_field.feature_pyramid(features_list)
+
+        # 创建点云并确保需要梯度
+        batch_size = images.shape[0]
+        points = self.model.implicit_field._create_grid_points(batch_size, images.device)
+        points.requires_grad_(True)
+
+        # 计算密度
+        densities = self.model.implicit_field.compute_density(points, fused_features)
 
         if is_training:
-            # 训练时直接返回点云和密度
             return points, densities
         else:
             # 验证/测试时生成完整网格

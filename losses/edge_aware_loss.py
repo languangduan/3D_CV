@@ -10,12 +10,72 @@ class EdgeAwareLoss(nn.Module):
         self.lambda_lap = lambda_lap
         self.beta_grad = beta_grad
 
-    def forward(self, pred_mesh, gt_mesh=None):
+    def forward(self, points, densities, depth_gradients=None):
         """
-        计算边缘感知损失
+        计算边缘感知损失 - 基于点云和密度场
+
         Args:
-            pred_mesh: 预测网格
-            gt_mesh: 可选的真值网格
+            points: 采样点 [B, N, 3]
+            densities: 密度值 [B, N, 1]
+            depth_gradients: 从深度图计算的表面法线 [B, N, 3] 或 None
+
+        Returns:
+            edge_loss: 边缘感知损失
+            metrics: 包含各损失组件的字典
+        """
+        # 确保points需要梯度
+        if not points.requires_grad:
+            points.requires_grad_(True)
+
+        # 1. 计算密度场梯度 (∇S(x))
+        grad_outputs = torch.ones_like(densities)
+        sdf_grad = torch.autograd.grad(
+            outputs=densities,
+            inputs=points,
+            grad_outputs=grad_outputs,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True
+        )[0]
+
+        # 2. 计算拉普拉斯项 (∇²S(x))
+        laplacian = 0
+        for i in range(3):  # xyz三个维度
+            grad_comp = sdf_grad[:, :, i:i + 1]
+            grad_outputs = torch.ones_like(grad_comp)
+            second_grad = torch.autograd.grad(
+                outputs=grad_comp,
+                inputs=points,
+                grad_outputs=grad_outputs,
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True
+            )[0]
+            laplacian += second_grad[:, :, i:i + 1]
+
+        # L1范数拉普拉斯损失
+        laplacian_loss = torch.abs(laplacian).mean()
+
+        # 3. 梯度一致性损失 (如果有深度梯度)
+        gradient_consistency = torch.tensor(0.0, device=points.device)
+        if depth_gradients is not None:
+            # 归一化梯度
+            sdf_grad_norm = F.normalize(sdf_grad, dim=2)
+            gradient_consistency = F.mse_loss(sdf_grad_norm, depth_gradients)
+
+        # 总损失
+        edge_loss = self.lambda_lap * laplacian_loss + self.beta_grad * gradient_consistency
+
+        return edge_loss, {
+            'laplacian_loss': laplacian_loss.item(),
+            'gradient_consistency': gradient_consistency.item() if isinstance(gradient_consistency,
+                                                                              torch.Tensor) else gradient_consistency
+        }
+
+    # 保留旧方法以便向后兼容
+    def compute_mesh_edge_loss(self, pred_mesh, gt_mesh=None):
+        """
+        计算基于网格的边缘感知损失（原始实现）
         """
         # 获取顶点和面
         verts = pred_mesh.verts_padded()

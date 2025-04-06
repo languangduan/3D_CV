@@ -71,28 +71,11 @@ class SingleViewReconstructor(nn.Module):
                 param.requires_grad = False
 
     def forward(self, x):
-        # 添加梯度检查点
-       #  print(f"Input x requires_grad: {x.requires_grad}")
+        # 提取多尺度特征
+        features_list = self.extract_features(x)
 
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        features = self.layer4(x)
-        # print(f"After layer4 requires_grad: {features.requires_grad}")
-
-        # 确保特征需要梯度
-        if not features.requires_grad:
-            features.requires_grad_(True)
-
-        feature_volume = self.volume_encoder(features)
-        # print(f"Feature volume requires_grad: {feature_volume.requires_grad}")
-
-        points, densities = self.implicit_field(feature_volume)
+        # 使用隐式场
+        points, densities = self.implicit_field(features_list)
         return points, densities
 
     def train(self, mode=True):
@@ -119,4 +102,21 @@ class SingleViewReconstructor(nn.Module):
                 nn.init.normal_(m.weight, std=0.001)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+
+    def extract_features(self, images):
+        """提取多尺度特征"""
+        # 使用骨干网络提取特征
+        x = self.conv1(images)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        # 提取多尺度特征
+        c1 = self.layer1(x)  # 低级特征
+        c2 = self.layer2(c1)  # 中级特征
+        c3 = self.layer3(c2)  # 高级特征
+        c4 = self.layer4(c3)  # 最高级特征
+
+        # 返回C3, C4, C5特征用于特征金字塔
+        return [c2, c3, c4]  # 对应ResNet的C3, C4, C5
 
