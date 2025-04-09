@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="face_parsing" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="face_parsing" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Remote Python 3.8.20 (sftp://duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22/scratch/duanyiyang/miniconda3/envs/face_parsing/bin/python)" project-jdk-type="Python SDK" />
 </project>

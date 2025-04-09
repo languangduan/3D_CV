@@ -15,6 +15,7 @@ from models.clip_encoder import CLIPEncoder
 from losses.combined_loss import CombinedLoss
 from data.shapenet import ShapeNetDataset
 from utils.aug import DataAugmentation
+from utils.metrics import Metrics
 
 
 def mesh_collate_fn(batch):
@@ -135,26 +136,57 @@ class CLIPNeRFTrainer(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        self.train()  # 确保模型在训练模式
+        self.train()
         images = batch['image']
         target_points = batch['points']
+        text_prompts = batch.get('text_prompts', None)
 
         # 前向传播
-        pred_points, pred_densities = self.generate_mesh(images, is_training=True)
+        features_list = self.model.extract_features(images)
+        fused_features, feature_weights, lighting_params = self.model.implicit_field.feature_pyramid(features_list)
 
-        # 检查输出是否有 NaN
-        if torch.isnan(pred_points).any() or torch.isnan(pred_densities).any():
-            print(f"Warning: NaN detected in model outputs at batch {batch_idx}")
-            # 创建一个与计算图相连的损失
-            return {"loss": torch.sum(pred_points * 0) + torch.tensor(1e6, device=self.device, requires_grad=True)}
+        # 创建点云并确保需要梯度
+        batch_size = images.shape[0]
+        points = self.model.implicit_field._create_grid_points(batch_size, images.device)
+        points.requires_grad_(True)
+
+        # 计算密度和颜色
+        densities, features = self.model.implicit_field.compute_density_and_features(points, fused_features)
+        albedo = self.model.implicit_field.color_net(features)
+        normals = self.model.implicit_field.compute_normals(points, densities)
+        colors = self.model.implicit_field.lighting_model.apply_lighting(
+            points, normals, albedo, lighting_params
+        )
+
+        # 提取CLIP特征
+        clip_features = None
+        if hasattr(self, 'clip_encoder'):
+            clip_features = self.clip_encoder(images)
+
+        # 提取密度场特征（用于CLIP损失）
+        density_features = self.model.implicit_field.extract_density_features(
+            points, densities, fused_features, clip_features
+        )
 
         # 计算损失
         loss_dict = self.loss_fn({
-            'pred_points': pred_points,
-            'pred_densities': pred_densities,
+            'pred_points': points,
+            'pred_densities': densities,
+            'pred_colors': colors,
+            'pred_normals': normals,
+            'density_features': density_features,
+            'original_images': images,
         }, {
             'target_points': target_points,
-        })
+            'text_prompts': text_prompts,
+        }, model=self.model)
+
+        # 记录损失组件
+        for key, value in loss_dict.items():
+            if isinstance(value, torch.Tensor):
+                self.log(f"train_{key}", value.item(), prog_bar=True)
+            else:
+                self.log(f"train_{key}", value, prog_bar=True)
 
         # 确保损失是标量且需要梯度
         if isinstance(loss_dict['total'], torch.Tensor):
@@ -162,37 +194,127 @@ class CLIPNeRFTrainer(pl.LightningModule):
         else:
             loss = torch.tensor(loss_dict['total'], device=self.device, requires_grad=True)
 
-        # 返回包含 'loss' 键的字典
         return {"loss": loss}
 
-    def training_step_(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx):
+        """验证步骤"""
+        self.eval()
         images = batch['image']
         target_points = batch['points']
-        try:
-            # 前向传播
-            pred_points, pred_densities = self.generate_mesh(images, is_training=True)
+        text_prompts = batch.get('text_prompts', None)
 
-            # 计算损失
-            loss_dict = self.loss_fn({
-                'pred_points': pred_points,
-                'pred_densities': pred_densities,
-            }, {
-                'target_points': target_points,
-            })
+        with torch.no_grad():
+            # 生成网格
+            meshes = self.generate_mesh(images, is_training=False)
 
-            # 检查损失值
-            if torch.isnan(loss_dict['total']):
-                print(f"Warning: NaN loss detected in batch {batch_idx}")
-                return None
+            # 渲染网格
+            rendered_images = self._render_mesh(meshes)
 
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+            # 计算评估指标
+            metrics = Metrics(device=self.device)
 
-            return loss_dict
+            # 提取点云
+            pred_points = meshes.verts_padded()
 
-        except ValueError as e:
-            print(f"Error in batch {batch_idx}: {e}")
-            return None
+            # 计算Chamfer距离
+            cd = metrics.compute_chamfer_distance(pred_points, target_points)
+
+            # 计算CLIP-SIM
+            if text_prompts is not None:
+                clip_sim = metrics.compute_clip_sim(rendered_images, text_prompts)
+                self.log("val_clip_sim", clip_sim, prog_bar=True)
+
+            # 记录指标
+            self.log("val_chamfer_distance", cd, prog_bar=True)
+
+            # 可视化结果
+            if batch_idx == 0:
+                # 保存渲染图像
+                self._save_visualization(rendered_images, batch_idx)
+
+        return {"val_chamfer_distance": cd}
+
+    def _save_visualization(self, rendered_images, batch_idx):
+        """保存可视化结果"""
+        import torchvision
+
+        # 选择前8个样本（或更少）
+        num_samples = min(8, rendered_images.shape[0])
+        images_to_save = rendered_images[:num_samples]
+
+        # 创建网格图像
+        grid = torchvision.utils.make_grid(images_to_save, nrow=4)
+
+        # 转换为PIL图像
+        from torchvision.transforms import ToPILImage
+        pil_image = ToPILImage()(grid.cpu())
+
+        # 保存图像
+        import os
+        os.makedirs("visualizations", exist_ok=True)
+        pil_image.save(f"visualizations/epoch_{self.current_epoch}_batch_{batch_idx}.png")
+
+    def test_step(self, batch, batch_idx):
+        """测试步骤"""
+        return self.validation_step(batch, batch_idx)
+
+    def training_step_(self, batch, batch_idx):
+        self.train()  # 确保模型在训练模式
+        images = batch['image']
+        target_points = batch['points']
+
+        # 获取文本提示
+        text_prompts = batch.get('text_prompts', None)
+
+        # 前向传播
+        pred_points, pred_densities = self.generate_mesh(images, is_training=True)
+
+        # 检查输出是否有 NaN
+        if torch.isnan(pred_points).any() or torch.isnan(pred_densities).any():
+            print(f"Warning: NaN detected in model outputs at batch {batch_idx}")
+            return {"loss": torch.sum(pred_points * 0) + torch.tensor(1e6, device=self.device, requires_grad=True)}
+
+        # 获取多尺度特征
+        features_list = self.model.extract_features(images)
+        fused_features, _ = self.model.implicit_field.feature_pyramid(features_list)
+
+        # 提取CLIP特征
+        clip_features = None
+        if hasattr(self, 'clip_encoder'):
+            clip_features = self.clip_encoder(images)
+
+        # 提取密度场特征（用于CLIP损失）
+        density_features = self.model.implicit_field.extract_density_features(
+            pred_points, pred_densities, fused_features, clip_features
+        )
+
+        # 计算损失
+        loss_dict = self.loss_fn({
+            'pred_points': pred_points,
+            'pred_densities': pred_densities,
+            'density_features': density_features,  # 使用密度特征代替渲染图像
+            'original_images': images,  # 可选：提供原始图像用于一致性损失
+        }, {
+            'target_points': target_points,
+            'text_prompts': text_prompts,
+        })
+
+        # 记录损失组件
+        for key, value in loss_dict.items():
+            if isinstance(value, torch.Tensor):
+                self.log(f"train_{key}", value.item(), prog_bar=True)
+            else:
+                self.log(f"train_{key}", value, prog_bar=True)
+
+        # 确保损失是标量且需要梯度
+        if isinstance(loss_dict['total'], torch.Tensor):
+            loss = loss_dict['total']
+        else:
+            loss = torch.tensor(loss_dict['total'], device=self.device, requires_grad=True)
+
+        return {"loss": loss}
+
+
 
     def _render_mesh(self, mesh):
         """
@@ -328,6 +450,66 @@ class CLIPNeRFTrainer(pl.LightningModule):
         return loader
 
     def generate_mesh(self, images, is_training=None):
+        """
+        从图像生成3D表示
+        """
+        if is_training is None:
+            is_training = self.training
+
+        # 获取多尺度特征
+        features_list = self.model.extract_features(images)
+
+        # 融合特征
+        fused_features, feature_weights, lighting_params = self.model.implicit_field.feature_pyramid(features_list)
+
+        # 提取CLIP特征
+        clip_features = None
+        if hasattr(self, 'clip_encoder'):
+            clip_features = self.clip_encoder(images)
+
+        # 创建点云并确保需要梯度
+        batch_size = images.shape[0]
+        points = self.model.implicit_field._create_grid_points(batch_size, images.device)
+        points.requires_grad_(True)
+
+        # 计算密度和颜色
+        densities, features = self.model.implicit_field.compute_density_and_features(points, fused_features)
+        albedo = self.model.implicit_field.color_net(features)
+        normals = self.model.implicit_field.compute_normals(points, densities)
+        colors = self.model.implicit_field.lighting_model.apply_lighting(
+            points, normals, albedo, lighting_params
+        )
+
+        if is_training:
+            return points, densities, colors, normals
+        else:
+            # 验证/测试时生成完整网格
+            with torch.no_grad():
+                verts, faces = self.convert_to_mesh(points, densities)
+                # 添加顶点颜色
+                verts_colors = self._interpolate_colors(points, verts, colors)
+                return Meshes(verts=[v for v in verts], faces=[f for f in faces],
+                              verts_rgb=[c for c in verts_colors])
+
+    def _interpolate_colors(self, points, verts, colors):
+        """将点云颜色插值到网格顶点"""
+        B = points.shape[0]
+        device = points.device
+        verts_colors = []
+
+        for b in range(B):
+            # 使用最近邻插值
+            from sklearn.neighbors import NearestNeighbors
+            nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(points[b].cpu().numpy())
+            _, indices = nbrs.kneighbors(verts[b].cpu().numpy())
+
+            # 获取颜色
+            vert_color = colors[b][indices.squeeze()]
+            verts_colors.append(torch.tensor(vert_color, device=device))
+
+        return verts_colors
+
+    def generate_mesh_(self, images, is_training=None):
         """
         从图像生成3D表示
         """

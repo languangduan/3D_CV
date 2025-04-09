@@ -1,8 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (10)" remoteFilesAllowedToDisappearOnAutoupload="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (2)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
+    <option name="confirmBeforeUploading" value="false" />
     <serverData>
-      <paths name="a6000">
+      <paths name="ALIYUN">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="PDCL">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
@@ -12,74 +20,18 @@
       <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (10)">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/scratch/duanyiyang/3D_CV" local="$PROJECT_DIR$" />
+            <mapping deploy="/3D_CV" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
       <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (2)">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/scratch/duanyiyang/3D_CV" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (3)">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (4)">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (5)">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (6)">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (7)">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (8)">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="duanyiyang@angel-gpu-ws01.dynip.ntu.edu.sg:22 password (9)">
-        <serverdata>
-          <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="yiyang@10.96.80.57:22 password">
+      <paths name="root@region-46.seetacloud.com:55950 password">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
