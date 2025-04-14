@@ -26,11 +26,11 @@ class CombinedLoss(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         # 损失权重
-        self.lambda_chamfer = getattr(cfg, 'lambda_chamfer', 1.0)
-        self.lambda_density = getattr(cfg, 'lambda_density', 0.1)
-        self.lambda_edge = getattr(cfg, 'lambda_edge', 0.2)
-        self.lambda_clip = getattr(cfg, 'lambda_clip', 0.1)  # 添加CLIP损失权重
-        self.lambda_depth = getattr(cfg, 'lambda_depth', 0.1)  # 添加深度一致性损失权重
+        self.lambda_chamfer = getattr(cfg, 'lambda_chamfer', 0.5)
+        self.lambda_density = getattr(cfg, 'lambda_density', 1.0)
+        self.lambda_edge = getattr(cfg, 'lambda_edge', 0.5)
+        self.lambda_clip = getattr(cfg, 'lambda_clip', 0.2)  # 添加CLIP损失权重
+        self.lambda_depth = getattr(cfg, 'lambda_depth', 0.2)  # 添加深度一致性损失权重
         self.lambda_reg = getattr(cfg, 'lambda_reg', 0.01)  # 添加正则化损失权重
 
         # 边缘感知损失
@@ -42,6 +42,7 @@ class CombinedLoss(nn.Module):
             )
 
         # 深度一致性损失
+        # TODO:需要修复这一损失。
         self.use_depth = getattr(cfg, 'use_depth', True)
         if self.use_depth:
             self.depth_loss = DepthConsistencyLoss()
@@ -54,7 +55,11 @@ class CombinedLoss(nn.Module):
         # 正则化损失
         self.use_reg = getattr(cfg, 'use_reg', True)
         if self.use_reg:
-            self.reg_loss = RegularizationLoss()
+            self.reg_loss = RegularizationLoss(
+                lambda_weight=0.001,  # 大幅降低权重衰减系数
+                lambda_smooth=0.01,   # 大幅降低平滑度正则化系数
+                max_loss=50.0          # 设置最大损失限制
+            )
 
     def forward(self, outputs, targets, model=None):
         """
@@ -144,6 +149,7 @@ class CombinedLoss(nn.Module):
                         outputs['pred_points'],
                         outputs['pred_densities']
                     )
+                    depth_loss = torch.clamp(depth_loss, max=1.0)
                     loss_dict['depth'] = depth_loss
             except Exception as e:
                 print(f"Error computing depth loss: {e}")
@@ -214,3 +220,18 @@ class CombinedLoss(nn.Module):
             return torch.tensor(0.0, device=densities.device)
 
         return loss
+
+    # def to(self, device):
+    #     """将损失函数的所有相关组件移动到指定设备"""
+    #     for attr_name, attr in self.__dict__.items():
+    #         if hasattr(attr, 'to'):
+    #             try:
+    #                 # 检查 to 方法需要的参数
+    #                 if callable(attr.to):
+    #                     # 尝试调用 to 方法
+    #                     setattr(self, attr_name, attr.to(device))
+    #             except TypeError:
+    #                 # 如果 to 方法需要不同的参数，可能是自定义对象
+    #                 print(f"警告: 无法将 {attr_name} 移动到设备 {device}，跳过")
+    #                 continue
+    #     return self

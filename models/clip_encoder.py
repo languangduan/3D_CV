@@ -7,10 +7,12 @@ from torchvision import transforms
 
 
 class CLIPEncoder(nn.Module):
-    def __init__(self, clip_model="ViT-B/32"):
+    def __init__(self, clip_model="ViT-B/32", device=None):
         super().__init__()
         # 加载预训练CLIP模型
-        self.clip_model, self.preprocess = clip.load(clip_model, device="cpu")
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.clip_model, self.preprocess = clip.load(clip_model, device=self.device)
+        self.clip_model = self.clip_model.float()
 
         # 冻结CLIP参数
         for param in self.clip_model.parameters():

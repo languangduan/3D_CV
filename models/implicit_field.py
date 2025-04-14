@@ -179,216 +179,6 @@ class FeaturePyramidFusion(nn.Module):
         return fused_features, weights_normalized.squeeze(-1).squeeze(-1), lighting
 
 
-class ImplicitField_(nn.Module):
-    def __init__(self, input_dim=256, hidden_dim=128, output_dim=1, num_layers=3):
-        super().__init__()
-
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-
-        # 特征金字塔融合
-        self.feature_pyramid = FeaturePyramidFusion(
-            feature_dims=[512, 1024, 2048],  # ResNet的C3, C4, C5特征
-            output_dim=input_dim
-        )
-
-        # 位置编码 - 增强坐标表示
-        self.num_encoding_functions = 6
-        self.pos_enc_dim = 3 * (1 + 2 * self.num_encoding_functions)
-
-        # 坐标编码网络 - 处理编码后的3D点坐标
-        self.coordinate_net = nn.Sequential(
-            nn.Linear(self.pos_enc_dim, hidden_dim),
-            nn.ReLU(inplace=False),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=False)
-        )
-
-        # 特征处理网络 - 处理图像特征
-        self.feature_net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(inplace=False),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=False)
-        )
-
-        # 融合网络 - 结合坐标和特征信息
-        fusion_layers = []
-        fusion_layers.append(nn.Linear(hidden_dim * 2, hidden_dim))
-        fusion_layers.append(nn.ReLU(inplace=False))
-
-        for _ in range(num_layers - 2):
-            fusion_layers.append(nn.Linear(hidden_dim, hidden_dim))
-            fusion_layers.append(nn.ReLU(inplace=False))
-
-        fusion_layers.append(nn.Linear(hidden_dim, output_dim))
-
-        self.fusion_net = nn.Sequential(*fusion_layers)
-
-        # 网格配置
-        self.grid_size = 32
-        self.chunk_size = 8192
-
-    def positional_encoding(self, x):
-        """
-        对输入坐标应用位置编码
-
-        Args:
-            x: 输入坐标 [B, N, 3]
-
-        Returns:
-            encoded: 编码后的坐标 [B, N, pos_enc_dim]
-        """
-        funcs = [torch.sin, torch.cos]
-
-        # 原始坐标
-        out = [x]
-
-        # 添加位置编码项
-        for i in range(self.num_encoding_functions):
-            freq = 2.0 ** i
-            for func in funcs:
-                out.append(func(freq * x))
-
-        return torch.cat(out, dim=-1)
-
-    def forward(self, features_list, points=None):
-        """
-        前向传播函数
-
-        Args:
-            features_list: 特征金字塔列表 [C3, C4, C5]，每个元素形状为[B, C_i, H_i, W_i]
-            points: 可选的点云坐标 [B, N, 3]，如果为None则创建网格点
-
-        Returns:
-            points: 点云坐标 [B, N, 3]
-            densities: 密度值 [B, N, 1]
-        """
-        # 融合多尺度特征
-        fused_features, feature_weights = self.feature_pyramid(features_list)
-        B = fused_features.shape[0]
-
-        # 如果没有提供点云，创建网格点
-        if points is None:
-            points = self._create_grid_points(B, fused_features.device)
-            points.requires_grad_(True)
-        elif not points.requires_grad:
-            # 确保点云需要梯度
-            points = points.detach().clone().requires_grad_(True)
-
-        # 分批处理点云以节省内存
-        all_densities = []
-        for i in range(0, points.shape[1], self.chunk_size):
-            chunk_points = points[:, i:i + self.chunk_size]
-            chunk_densities = self.compute_density(chunk_points, fused_features)
-            all_densities.append(chunk_densities)
-
-        # 合并所有密度预测
-        densities = torch.cat(all_densities, dim=1)
-
-        return points, densities
-
-    def compute_density(self, points, features):
-        """
-        计算点云密度
-
-        Args:
-            points: 点云坐标 [B, N, 3]
-            features: 融合的特征图 [B, C, H, W]
-
-        Returns:
-            densities: 密度值 [B, N, 1]
-        """
-        B, N = points.shape[:2]
-
-        # 确保点云需要梯度
-        if not points.requires_grad:
-            points = points.detach().clone().requires_grad_(True)
-
-        # 对点坐标应用位置编码
-        encoded_points = self.positional_encoding(points)
-
-        # 处理编码后的3D坐标
-        coord_features = self.coordinate_net(encoded_points)
-
-        # 提取点特征 - 使用全局特征
-        global_features = F.adaptive_avg_pool2d(features, 1).squeeze(-1).squeeze(-1)
-        global_features = global_features.unsqueeze(1).expand(B, N, -1)
-        feat_features = self.feature_net(global_features)
-
-        # 融合坐标和特征信息
-        combined_features = torch.cat([coord_features, feat_features], dim=-1)
-        densities = self.fusion_net(combined_features)
-
-        return densities
-
-    def _create_grid_points(self, batch_size, device):
-        """
-        创建均匀网格点
-
-        Args:
-            batch_size: 批次大小
-            device: 设备
-
-        Returns:
-            points: 网格点坐标 [B, N, 3]
-        """
-        # 生成网格点
-        x = torch.linspace(-1, 1, self.grid_size, device=device)
-        y = torch.linspace(-1, 1, self.grid_size, device=device)
-        z = torch.linspace(-1, 1, self.grid_size, device=device)
-
-        xx, yy, zz = torch.meshgrid(x, y, z, indexing='ij')
-        points = torch.stack([xx, yy, zz], dim=-1).view(-1, 3)
-        points = points.unsqueeze(0).expand(batch_size, -1, -1)
-
-        return points
-
-    # models/implicit_field.py
-    def extract_density_features(self, points, densities, features, clip_features=None):
-        """
-        从密度场提取语义特征
-
-        Args:
-            points: 点云坐标 [B, N, 3]
-            densities: 密度值 [B, N, 1]
-            features: 图像特征 [B, C, H, W]
-            clip_features: CLIP特征 [B, D] 或 None
-
-        Returns:
-            density_features: 密度场特征 [B, C]
-        """
-        B = points.shape[0]
-
-        # 提取全局图像特征
-        global_features = F.adaptive_avg_pool2d(features, 1).squeeze(-1).squeeze(-1)  # [B, C]
-
-        # 提取密度统计特征
-        # 使用密度作为权重，计算加权平均的点坐标
-        weights = F.softmax(densities.squeeze(-1), dim=1)  # [B, N]
-        weighted_points = torch.bmm(weights.unsqueeze(1), points).squeeze(1)  # [B, 3]
-
-        # 计算密度的统计矩
-        density_mean = torch.mean(densities, dim=1)  # [B, 1]
-        density_var = torch.var(densities, dim=1)  # [B, 1]
-
-        # 组合特征
-        combined_features = [global_features, weighted_points, density_mean, density_var]
-
-        # 如果有CLIP特征，也加入
-        if clip_features is not None:
-            combined_features.append(clip_features)
-
-        # 拼接所有特征
-        density_features = torch.cat([f.view(B, -1) for f in combined_features], dim=1)
-
-        # 使用MLP投影到固定维度
-        density_features = self.density_feature_mlp(density_features)
-
-        return density_features
-
-
 class ImplicitField(nn.Module):
     def __init__(self, input_dim=256, hidden_dim=128, output_dim=1, num_layers=3, clip_dim=512):
         super().__init__()
@@ -526,7 +316,7 @@ class ImplicitField(nn.Module):
 
         return points, densities, colors
 
-    def compute_normals(self, points, densities):
+    def compute_normals_(self, points, densities):
         """计算点云的法线"""
         grad_outputs = torch.ones_like(densities)
         gradients = torch.autograd.grad(
@@ -542,6 +332,100 @@ class ImplicitField(nn.Module):
         normals = F.normalize(gradients, dim=2)
 
         return normals
+    def compute_normals_safe(self, points, densities):
+        """
+        安全地计算法线，确保梯度流
+
+        Args:
+            points: 点云坐标 [B, N, 3]
+            densities: 点云密度 [B, N, 1]
+        Returns:
+            normals: 法线向量 [B, N, 3]
+        """
+        # 确保输入是分离的并且需要梯度
+        points_grad = points.detach().clone().requires_grad_(True)
+
+        # 确保密度是连续的
+        densities = densities.contiguous()
+
+        try:
+            # 创建与密度形状匹配的grad_outputs
+            grad_outputs = torch.ones_like(densities)
+
+            # 计算梯度
+            gradients = torch.autograd.grad(
+                outputs=densities,
+                inputs=points_grad,
+                grad_outputs=grad_outputs,
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True,
+                allow_unused=True  # 允许未使用的输入
+            )[0]
+
+            # 检查梯度是否为None
+            if gradients is None:
+                print("警告: 计算的梯度为None，使用随机法线")
+                return torch.nn.functional.normalize(torch.randn_like(points), dim=2)
+
+            # 检查NaN
+            if torch.isnan(gradients).any():
+                print("警告: 梯度中检测到NaN，使用随机法线")
+                return torch.nn.functional.normalize(torch.randn_like(points), dim=2)
+
+            # 归一化梯度
+            normals = torch.nn.functional.normalize(gradients, dim=2)
+
+            return normals
+
+        except Exception as e:
+            print(f"安全计算法线时出错: {e}")
+            # 返回随机法线作为后备
+            return torch.nn.functional.normalize(torch.randn_like(points), dim=2)
+
+
+    def compute_normals(self, points, densities):
+        """
+        计算点云的法线
+
+        Args:
+            points: 点云坐标 [B, N, 3]
+            densities: 点云密度 [B, N, 1]
+        Returns:
+            normals: 法线向量 [B, N, 3]
+        """
+        # 检查是否需要梯度
+        needs_grad = points.requires_grad
+        original_points = points
+
+        # 如果不需要梯度，临时启用
+        if not needs_grad:
+            points = points.detach().requires_grad_(True)
+
+        try:
+            grad_outputs = torch.ones_like(densities)
+            gradients = torch.autograd.grad(
+                outputs=densities,
+                inputs=points,
+                grad_outputs=grad_outputs,
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True
+            )[0]
+
+            # 归一化梯度
+            normals = F.normalize(gradients, dim=2)
+
+            # 如果原始点不需要梯度，确保结果也不需要梯度
+            if not needs_grad:
+                normals = normals.detach()
+
+            return normals
+
+        except Exception as e:
+            print(f"计算法线时出错: {e}")
+            # 返回随机法线作为后备
+            return torch.nn.functional.normalize(torch.randn_like(original_points), dim=2).detach()
 
     def compute_density_and_features(self, points, features):
         """
@@ -616,7 +500,7 @@ class ImplicitField(nn.Module):
 
         return points
 
-    def extract_density_features(self, points, densities, features, clip_features=None):
+    def extract_density_features_(self, points, densities, features, clip_features=None):
         """
         从密度场提取语义特征
 
@@ -678,5 +562,103 @@ class ImplicitField(nn.Module):
             print(f"Feature shapes: {[f.shape for f in combined_features]}")
             # 返回一个随机特征作为后备
             density_features = torch.randn(B, 512, device=points.device)
+
+        return density_features
+
+    def extract_density_features(self, points, densities, features, clip_features=None):
+        """
+        从密度场提取语义特征
+
+        Args:
+            points: 点云坐标 [B, N, 3]
+            densities: 密度值 [B, N, 1]
+            features: 图像特征 [B, C, H, W]
+            clip_features: CLIP特征 [B, D] 或 None
+
+        Returns:
+            density_features: 密度场特征 [B, 512]
+        """
+        B = points.shape[0]
+
+        # 打印输入形状以便调试
+        # print(f"DEBUG: points shape: {points.shape}")
+        # print(f"DEBUG: densities shape: {densities.shape}")
+        # print(f"DEBUG: features shape: {features.shape}")
+        # if clip_featsures is not None:
+        #     print(f"DEBUG: clip_features shape: {clip_features.shape}")
+
+        try:
+            # 提取全局图像特征
+            if len(features.shape) == 4:  # [B, C, H, W]
+                global_features = F.adaptive_avg_pool2d(features, 1).squeeze(-1).squeeze(-1)  # [B, C]
+                # print(f"DEBUG: global_features shape: {global_features.shape}")
+            else:  # 如果已经是 [B, C]
+                global_features = features
+                # print(f"DEBUG: global_features shape (already flattened): {global_features.shape}")
+
+            # 提取密度统计特征
+            weights = F.softmax(densities.squeeze(-1), dim=1)  # [B, N]
+            weighted_points = torch.bmm(weights.unsqueeze(1), points).squeeze(1)  # [B, 3]
+            # print(f"DEBUG: weighted_points shape: {weighted_points.shape}")
+
+            # 计算密度的统计矩
+            density_mean = torch.mean(densities, dim=1)  # [B, 1]
+            density_var = torch.var(densities, dim=1)  # [B, 1]
+            # print(f"DEBUG: density_mean shape: {density_mean.shape}")
+            # print(f"DEBUG: density_var shape: {density_var.shape}")
+
+            # 组合特征
+            combined_features = []
+
+            # 添加全局特征
+            combined_features.append(global_features)
+
+            # 添加加权点坐标
+            combined_features.append(weighted_points)
+
+            # 添加密度统计
+            combined_features.append(density_mean)
+            combined_features.append(density_var)
+
+            # 如果有CLIP特征，也加入
+            if clip_features is not None:
+                combined_features.append(clip_features)
+
+            # 打印每个特征的形状
+            # for i, feat in enumerate(combined_features):
+            #     # print(f"DEBUG: Feature {i} shape: {feat.shape}")
+
+            # 确保所有特征都是2D张量 [B, D]
+            for i in range(len(combined_features)):
+                if len(combined_features[i].shape) > 2:
+                    combined_features[i] = combined_features[i].view(B, -1)
+                elif len(combined_features[i].shape) < 2:
+                    combined_features[i] = combined_features[i].view(B, -1)
+
+            # 拼接所有特征
+            density_features = torch.cat([f for f in combined_features], dim=1)
+            actual_dim = density_features.shape[1]
+            # print(f"DEBUG: Concatenated density_features shape: {density_features.shape}")
+
+            # 使用动态MLP处理任何维度的输入
+            if not hasattr(self, '_dynamic_density_mlp') or self._dynamic_density_mlp[0].in_features != actual_dim:
+                # print(f"Creating dynamic density_feature_mlp with input dim {actual_dim}")
+                self._dynamic_density_mlp = nn.Sequential(
+                    nn.Linear(actual_dim, 512),
+                    nn.ReLU(inplace=False),
+                    nn.Linear(512, 512)
+                ).to(density_features.device)
+
+            # 使用动态MLP
+            density_features = self._dynamic_density_mlp(density_features)
+            # print(f"DEBUG: Final density_features shape: {density_features.shape}")
+
+        except Exception as e:
+            print(f"Error in extract_density_features: {e}")
+            import traceback
+            traceback.print_exc()
+            # 返回一个随机特征作为后备
+            density_features = torch.randn(B, 512, device=points.device)
+            print("WARNING: Returning random features due to error")
 
         return density_features

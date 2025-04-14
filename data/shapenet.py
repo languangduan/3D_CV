@@ -127,7 +127,7 @@ class ShapeNetDataset(Dataset):
                         break
         return processed_categories
 
-    def _load_samples(self, split):
+    def _load_samples_(self, split):
         """加载数据样本，适配新的目录结构"""
         samples = []
         for cat_id in self.categories:
@@ -256,12 +256,12 @@ class ShapeNetDataset(Dataset):
             print(f"Error downloading dataset: {str(e)}")
             raise
 
-    def _load_samples_(self, split):
-        """加载数据样本，适配新的目录结构"""
+    def _load_samples(self, split):
+        """加载数据样本，并限制每个实例的图像数量"""
         samples = []
         for cat_id in self.categories:
             cat_samples = []
-            cat_dir = os.path.join(self.root, 'ShapeNetCore.v2','ShapeNetCore.v2', cat_id)
+            cat_dir = os.path.join(self.root, 'ShapeNetCore.v2', 'ShapeNetCore.v2', cat_id)
 
             print(f"\nDebug - Checking category directory: {cat_dir}")
 
@@ -286,10 +286,22 @@ class ShapeNetDataset(Dataset):
             for instance_id in tqdm(instance_dirs, desc=f"Loading {self.CATEGORY_MAP[cat_id]}"):
                 # 更新screenshots目录的路径
                 screenshots_dir = os.path.join(cat_dir, instance_id, 'screenshots')
+
+                # 更新模型文件路径为PLY文件
+                model_path = os.path.join(cat_dir, instance_id, 'models', 'model_normalized.ply')
+
                 if os.path.exists(screenshots_dir):
                     # 获取所有png文件
-                    image_files = sorted([f for f in os.listdir(screenshots_dir)
-                                          if f.endswith('.png')])
+                    all_image_files = sorted([f for f in os.listdir(screenshots_dir)
+                                              if f.endswith('.png')])
+
+                    # 从24张图像中均匀选择6张
+                    if len(all_image_files) > 6:
+                        # 计算采样间隔，确保均匀采样
+                        step = len(all_image_files) // 6
+                        image_files = all_image_files[::step][:6]  # 取步长为step的6张图像
+                    else:
+                        image_files = all_image_files  # 如果图像少于6张，使用全部
 
                     if image_files:  # 如果有图片文件
                         cat_samples.append({
@@ -297,8 +309,8 @@ class ShapeNetDataset(Dataset):
                             'category_id': cat_id,
                             'category_name': self.CATEGORY_MAP[cat_id],
                             'screenshots_dir': screenshots_dir,
-                            'image_files': image_files,
-                            'model_path': os.path.join(cat_dir, instance_id, 'models/model.obj')
+                            'image_files': image_files,  # 这里已经减少到6张或更少
+                            'model_path': model_path
                         })
                 else:
                     print(f"Debug - Screenshots directory not found: {screenshots_dir}")
@@ -346,7 +358,7 @@ class ShapeNetDataset(Dataset):
             'category': sample['category_id'],
             'category_name': sample['category_name'],
             'instance_id': sample['instance_id'],
-            'text': np.random.choice(self.CATEGORY_DESCRIPTIONS[sample['category_id']]),
+            'text_prompts': np.random.choice(self.CATEGORY_DESCRIPTIONS[sample['category_id']]),
             'model_path': model_path,
             'depth': torch.ones(1, self.img_size, self.img_size) * 0.5 if self.use_depth else torch.zeros(1,
                                                                                                           self.img_size,
