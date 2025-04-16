@@ -14,7 +14,7 @@ class DepthConsistencyLoss(nn.Module):
         self.min_depth = min_depth
         self.max_depth = max_depth
 
-    def forward(self, images, points, densities):
+    def forward(self, images, points, densities, normals=None):
         """
         计算深度一致性损失
 
@@ -63,10 +63,25 @@ class DepthConsistencyLoss(nn.Module):
             # 添加结构相似性损失
             ssim_loss = self.compute_ssim_loss(projected_depth, depth_gt, valid_mask)
 
-            # 组合损失
-            total_loss = 0.8 * loss + 0.2 * ssim_loss
+            # 添加法线引导损失
+            if normals is not None:
+                # 从深度图估计法线
+                depth_normals = self.estimate_normals_from_depth(depth_gt)
 
-            # 限制损失大小
+                # 将点云法线投影到图像平面
+                projected_normals = self.project_normals_to_image(points, normals, densities)
+
+                # 计算法线一致性损失
+                normal_loss = 1.0 - torch.sum(projected_normals * depth_normals, dim=1, keepdim=True)
+                normal_loss = normal_loss * valid_mask  # 应用相同的有效区域掩码
+                normal_loss = torch.sum(normal_loss) / (valid_mask.sum() + 1e-8)
+
+                # 更新总损失，加入法线损失
+                total_loss = 0.6 * loss + 0.2 * ssim_loss + 0.2 * normal_loss
+            else:
+                total_loss = 0.8 * loss + 0.2 * ssim_loss
+
+                # 限制损失大小
             total_loss = torch.clamp(total_loss, max=1.0)
 
             return total_loss
@@ -221,3 +236,110 @@ class DepthConsistencyLoss(nn.Module):
         except Exception as e:
             print(f"Error in point projection: {e}")
             return torch.zeros(B, 1, H, W, device=points.device)
+
+    def estimate_normals_from_depth(self, depth):
+        """从深度图估计表面法线"""
+        B, _, H, W = depth.shape
+
+        # 计算深度梯度
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32, device=depth.device).view(1,
+                                                                                                                    1,
+                                                                                                                    3,
+                                                                                                                    3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32, device=depth.device).view(1,
+                                                                                                                    1,
+                                                                                                                    3,
+                                                                                                                    3)
+
+        # 应用Sobel算子计算梯度
+        dx = F.conv2d(depth, sobel_x, padding=1)
+        dy = F.conv2d(depth, sobel_y, padding=1)
+
+        # 创建法线向量 [B, 3, H, W]
+        normals = torch.cat([-dx, -dy, torch.ones_like(dx)], dim=1)
+
+        # 归一化法线
+        norm = torch.sqrt(torch.sum(normals ** 2, dim=1, keepdim=True))
+        normals = normals / (norm + 1e-10)
+
+        return normals
+
+    def project_normals_to_image(self, points, normals, densities):
+        """将点云法线投影到图像平面"""
+        # 复用现有的投影逻辑，但投影法线而不是深度
+        B, N, _ = points.shape
+        H = W = self.image_size
+
+        # 初始化法线图
+        normal_map = torch.zeros(B, 3, H, W, device=points.device)
+        weight_map = torch.zeros(B, 1, H, W, device=points.device)
+
+        # 使用sigmoid激活确保权重在[0,1]范围内
+        weights = torch.sigmoid(densities).squeeze(-1)  # [B, N]
+
+        # 投影逻辑与project_points_to_depth类似
+        for b in range(B):
+            # 过滤掉z值太小或为负的点
+            valid_mask = points[b, :, 2] > self.min_depth
+            if not valid_mask.any():
+                continue
+
+            valid_points = points[b, valid_mask]
+            valid_normals = normals[b, valid_mask]
+            valid_weights = weights[b, valid_mask]
+
+            if valid_points.shape[0] == 0:
+                continue
+
+            # 提取坐标
+            x = valid_points[:, 0]
+            y = valid_points[:, 1]
+            z = valid_points[:, 2]
+
+            # 避免除零
+            z_safe = torch.clamp(z, min=self.min_depth)
+
+            # 投影到图像平面
+            fx = fy = 1.0
+            cx = cy = 0.5
+            u = (fx * x / z_safe) + cx
+            v = (fy * y / z_safe) + cy
+
+            # 转换为像素坐标
+            u_px = u * W
+            v_px = v * H
+
+            # 限制在有效范围内
+            valid_proj = (u_px >= 0) & (u_px < W) & (v_px >= 0) & (v_px < H)
+
+            if not valid_proj.any():
+                continue
+
+            u_px = u_px[valid_proj]
+            v_px = v_px[valid_proj]
+            n_values = valid_normals[valid_proj]
+            w_values = valid_weights[valid_proj]
+
+            # 转换为整数坐标
+            u_px_int = u_px.long().clamp(0, W - 1)
+            v_px_int = v_px.long().clamp(0, H - 1)
+
+            # 投影法线
+            for i in range(len(u_px_int)):
+                ui, vi = u_px_int[i], v_px_int[i]
+                ni, wi = n_values[i], w_values[i]
+
+                # 累积加权法线
+                normal_map[b, :, vi, ui] += ni * wi
+                weight_map[b, 0, vi, ui] += wi
+
+        # 计算加权平均法线
+        valid_mask = weight_map > 0
+        for c in range(3):
+            normal_map[:, c:c + 1][valid_mask] = normal_map[:, c:c + 1][valid_mask] / weight_map[valid_mask]
+
+        # 再次归一化确保单位长度
+        norm = torch.sqrt(torch.sum(normal_map ** 2, dim=1, keepdim=True))
+        normal_map = normal_map / (norm + 1e-10)
+
+        return normal_map

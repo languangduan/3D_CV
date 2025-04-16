@@ -84,17 +84,17 @@ class Metrics:
                 text_prompts = batch['text_prompts']
 
                 # 生成网格
-                meshes = model.generate_mesh(images, is_training=False)
+                meshes_ = model.generate_mesh(images, is_training=False)
 
                 # 提取点云
-                pred_points = meshes.verts_padded()
+                pred_points = meshes_.verts_padded()
 
                 # 计算Chamfer距离
                 cd = self.compute_chamfer_distance(pred_points, target_points)
                 chamfer_distances.append(cd)
 
                 # 渲染网格
-                rendered_images = renderer(meshes)
+                rendered_images = renderer(meshes_)
                 rendered_images = rendered_images[..., :3].permute(0, 3, 1, 2)
 
                 # 计算CLIP-SIM

@@ -127,65 +127,6 @@ class ShapeNetDataset(Dataset):
                         break
         return processed_categories
 
-    def _load_samples_(self, split):
-        """加载数据样本，适配新的目录结构"""
-        samples = []
-        for cat_id in self.categories:
-            cat_samples = []
-            cat_dir = os.path.join(self.root, 'ShapeNetCore.v2', 'ShapeNetCore.v2', cat_id)
-
-            print(f"\nDebug - Checking category directory: {cat_dir}")
-
-            if not os.path.exists(cat_dir):
-                print(f"Warning: Category directory {cat_dir} not found")
-                continue
-
-            # 直接列出类别目录下的所有实例目录
-            instance_dirs = [d for d in os.listdir(cat_dir)
-                             if os.path.isdir(os.path.join(cat_dir, d))]
-            print(f"Debug - Found {len(instance_dirs)} instance directories")
-
-            # 应用采样限制
-            if self.samples_per_category is not None:
-                if len(instance_dirs) > self.samples_per_category:
-                    instance_dirs = np.random.choice(
-                        instance_dirs,
-                        self.samples_per_category,
-                        replace=False
-                    ).tolist()
-
-            for instance_id in tqdm(instance_dirs, desc=f"Loading {self.CATEGORY_MAP[cat_id]}"):
-                # 更新screenshots目录的路径
-                screenshots_dir = os.path.join(cat_dir, instance_id, 'screenshots')
-
-                # 更新模型文件路径为PLY文件
-                model_path = os.path.join(cat_dir, instance_id, 'models', 'model_normalized.ply')
-
-                if os.path.exists(screenshots_dir):
-                    # 获取所有png文件
-                    image_files = sorted([f for f in os.listdir(screenshots_dir)
-                                          if f.endswith('.png')])
-
-                    if image_files:  # 如果有图片文件
-                        cat_samples.append({
-                            'instance_id': instance_id,
-                            'category_id': cat_id,
-                            'category_name': self.CATEGORY_MAP[cat_id],
-                            'screenshots_dir': screenshots_dir,
-                            'image_files': image_files,
-                            'model_path': model_path
-                        })
-                else:
-                    print(f"Debug - Screenshots directory not found: {screenshots_dir}")
-
-            samples.extend(cat_samples)
-            print(f"Loaded {len(cat_samples)} samples for category {self.CATEGORY_MAP[cat_id]}")
-
-        if len(samples) == 0:
-            raise RuntimeError("No samples found in the dataset! Please check the data directory structure.")
-
-        return samples
-
     def _load_mesh(self, model_path):
         """加载PLY模型文件"""
         if not self.load_meshes or not os.path.exists(model_path):
