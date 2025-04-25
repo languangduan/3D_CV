@@ -92,7 +92,8 @@ class FeaturePyramidFusion(nn.Module):
 
 
 class ImplicitField(nn.Module):
-    def __init__(self, input_dim=256, hidden_dim=128, output_dim=1, num_layers=3, clip_dim=512):
+    def __init__(self, input_dim=256, hidden_dim=256, output_dim=1, num_layers=6, clip_dim=512,
+                 positional_encoding_start_epoch=30, positional_encoding_ramp=20,):
         super().__init__()
 
         self.input_dim = input_dim
@@ -114,6 +115,9 @@ class ImplicitField(nn.Module):
         # 位置编码 - 增强坐标表示
         self.num_encoding_functions = 6
         self.pos_enc_dim = 3 * (1 + 2 * self.num_encoding_functions)
+        self.positional_encoding_start_epoch = positional_encoding_start_epoch
+        self.positional_encoding_ramp = positional_encoding_ramp
+        self.current_epoch = 0  # 训练时动态设置
 
         # 坐标编码网络 - 处理编码后的3D点坐标
         self.coordinate_net = nn.Sequential(
@@ -135,13 +139,10 @@ class ImplicitField(nn.Module):
         fusion_layers = []
         fusion_layers.append(nn.Linear(hidden_dim * 2, hidden_dim))
         fusion_layers.append(nn.ReLU(inplace=False))
-
         for _ in range(num_layers - 2):
             fusion_layers.append(nn.Linear(hidden_dim, hidden_dim))
             fusion_layers.append(nn.ReLU(inplace=False))
-
         fusion_layers.append(nn.Linear(hidden_dim, output_dim))
-
         self.fusion_net = nn.Sequential(*fusion_layers)
 
         # 网格配置
@@ -170,28 +171,33 @@ class ImplicitField(nn.Module):
             nn.Linear(512, 512)
         )
 
-    def positional_encoding(self, x):
+    def positional_encoding(self, x, weight=1.0):
         """
-        对输入坐标应用位置编码
-
+        对输入坐标应用位置编码，并可按权重渐进引入
         Args:
             x: 输入坐标 [B, N, 3]
-
+            weight: 位置编码权重 0~1
         Returns:
             encoded: 编码后的坐标 [B, N, pos_enc_dim]
         """
         funcs = [torch.sin, torch.cos]
+        out = [x]  # 原始坐标
 
-        # 原始坐标
-        out = [x]
-
-        # 添加位置编码项
+        # 位置编码项
         for i in range(self.num_encoding_functions):
             freq = 2.0 ** i
             for func in funcs:
                 out.append(func(freq * x))
 
-        return torch.cat(out, dim=-1)
+        encoded = torch.cat(out, dim=-1)
+
+        # weight=0时只用原始坐标，weight=1时全用编码
+        if weight < 1.0:
+            # 只用原始坐标（重复填充到同shape）
+            base = torch.cat([x] + [torch.zeros_like(x) for _ in range(2 * self.num_encoding_functions)], dim=-1)
+            encoded = (1 - weight) * base + weight * encoded
+
+        return encoded
 
     def forward(self, features_list, points=None):
         """
@@ -275,7 +281,27 @@ class ImplicitField(nn.Module):
             # 返回随机法线作为后备
             return torch.nn.functional.normalize(torch.randn_like(original_points), dim=2).detach()
 
-    def compute_density_and_features(self, points, features):
+    def sample_features(self, features, points):
+        """
+        对每个点从特征图采样局部特征
+        Args:
+            features: [B, C, H, W]
+            points: [B, N, 3]，假设已归一化到[-1,1]
+        Returns:
+            sampled_feats: [B, N, C]
+        """
+        B, N, _ = points.shape
+        # 只取前两个维度作为xy平面坐标
+        grid = points[..., :2].clone()  # [B, N, 2]
+        grid = grid.unsqueeze(2)  # [B, N, 1, 2]
+        # grid_sample 要求 grid 为 [B, H_out, W_out, 2]，这里 H_out=N, W_out=1
+        sampled = F.grid_sample(
+            features, grid, mode='bilinear', align_corners=True
+        )  # [B, C, N, 1]
+        sampled = sampled.squeeze(-1).permute(0, 2, 1)  # [B, N, C]
+        return sampled
+
+    def compute_density_and_features(self, points, features, positional_encoding_weight=1.0):
         """
         计算点云密度和特征（增强数值稳定性）
 
@@ -302,7 +328,7 @@ class ImplicitField(nn.Module):
 
             try:
                 # 对点坐标应用位置编码
-                encoded_points = self.positional_encoding(chunk_points)
+                encoded_points = self.positional_encoding(chunk_points, weight=positional_encoding_weight)
 
                 # 检查编码是否有效
                 if torch.isnan(encoded_points).any() or torch.isinf(encoded_points).any():
@@ -316,10 +342,9 @@ class ImplicitField(nn.Module):
                 # 处理编码后的3D坐标
                 coord_features = self.coordinate_net(encoded_points)
 
-                # 提取点特征 - 使用全局特征
-                global_features = F.adaptive_avg_pool2d(features, 1).squeeze(-1).squeeze(-1)
-                global_features = global_features.unsqueeze(1).expand(B, chunk_points.shape[1], -1)
-                feat_features = self.feature_net(global_features)
+                # 对每个点采样特征
+                sampled_features = self.sample_features(features, chunk_points)  # [B, N_chunk, C]
+                feat_features = self.feature_net(sampled_features)
 
                 # 融合坐标和特征信息
                 combined_features = torch.cat([coord_features, feat_features], dim=-1)
@@ -369,58 +394,6 @@ class ImplicitField(nn.Module):
             # 创建安全的替代值
             densities = torch.zeros((B, N, 1), device=points.device)
             point_features = torch.zeros((B, N, self.hidden_dim * 2), device=points.device)
-
-        return densities, point_features
-
-
-    def compute_density_and_features_(self, points, features):
-        """
-        计算点云密度和特征
-
-        Args:
-            points: 点云坐标 [B, N, 3]
-            features: 融合的特征图 [B, C, H, W]
-
-        Returns:
-            densities: 密度值 [B, N, 1]
-            point_features: 点特征 [B, N, hidden_dim*2]
-        """
-        B, N = points.shape[:2]
-
-        # 分批处理点云以节省内存
-        all_densities = []
-        all_point_features = []
-
-        for i in range(0, points.shape[1], self.chunk_size):
-            chunk_points = points[:, i:i + self.chunk_size]
-
-            # 确保点云需要梯度
-            if not chunk_points.requires_grad:
-                chunk_points = chunk_points.detach().clone().requires_grad_(True)
-
-            # 对点坐标应用位置编码
-            encoded_points = self.positional_encoding(chunk_points)
-
-            # 处理编码后的3D坐标
-            coord_features = self.coordinate_net(encoded_points)
-
-            # 提取点特征 - 使用全局特征
-            global_features = F.adaptive_avg_pool2d(features, 1).squeeze(-1).squeeze(-1)
-            global_features = global_features.unsqueeze(1).expand(B, chunk_points.shape[1], -1)
-            feat_features = self.feature_net(global_features)
-
-            # 融合坐标和特征信息
-            combined_features = torch.cat([coord_features, feat_features], dim=-1)
-
-            # 预测密度
-            chunk_densities = self.fusion_net(combined_features)
-
-            all_densities.append(chunk_densities)
-            all_point_features.append(combined_features)
-
-        # 合并所有密度预测和特征
-        densities = torch.cat(all_densities, dim=1)
-        point_features = torch.cat(all_point_features, dim=1)
 
         return densities, point_features
 

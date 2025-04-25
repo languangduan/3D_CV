@@ -1,0 +1,14 @@
+numpy~=1.24.3
+trimesh~=4.6.6
+torch~=1.12.0+cu116
+kagglehub~=0.2.9
+pillow~=10.4.0
+pytorch3d~=0.7.2
+torchvision~=0.13.0+cu116
+tqdm~=4.67.1
+pyrender~=0.1.45
+opencv-python~=4.11.0.86
+matplotlib~=3.7.5
+clip~=1.0
+xformers~=0.0.13
+wandb~=0.19.9

@@ -1,5 +1,7 @@
 import os
 import json
+import re
+
 import numpy as np
 import trimesh
 from PIL import Image
@@ -68,7 +70,7 @@ class ShapeNetDataset(Dataset):
         """
         # 设置默认路径
         if root_dir is None:
-            root_dir = os.path.expanduser('~/datasets/shapenet')
+            root_dir = os.path.expanduser('/scratch/duanyiyang/datasets/shapenet')
         self.root = root_dir
         self.load_meshes = load_meshes
 
@@ -197,7 +199,7 @@ class ShapeNetDataset(Dataset):
             print(f"Error downloading dataset: {str(e)}")
             raise
 
-    def _load_samples(self, split):
+    def _load_samples_(self, split):
         """加载数据样本，并限制每个实例的图像数量"""
         samples = []
         for cat_id in self.categories:
@@ -225,36 +227,73 @@ class ShapeNetDataset(Dataset):
                     ).tolist()
 
             for instance_id in tqdm(instance_dirs, desc=f"Loading {self.CATEGORY_MAP[cat_id]}"):
-                # 更新screenshots目录的路径
                 screenshots_dir = os.path.join(cat_dir, instance_id, 'screenshots')
-
-                # 更新模型文件路径为PLY文件
                 model_path = os.path.join(cat_dir, instance_id, 'models', 'model_normalized.ply')
 
-                if os.path.exists(screenshots_dir):
-                    # 获取所有png文件
-                    all_image_files = sorted([f for f in os.listdir(screenshots_dir)
-                                              if f.endswith('.png')])
+                print(f"Checking instance: {instance_id}")
+                print(f"  screenshots_dir: {screenshots_dir}")
+                if not os.path.exists(screenshots_dir):
+                    print(f"  Screenshots directory NOT found.")
+                    continue
 
-                    # 从24张图像中均匀选择6张
-                    if len(all_image_files) > 6:
-                        # 计算采样间隔，确保均匀采样
-                        step = len(all_image_files) // 6
-                        image_files = all_image_files[::step][:6]  # 取步长为step的6张图像
-                    else:
-                        image_files = all_image_files  # 如果图像少于6张，使用全部
+                all_image_files = sorted([f for f in os.listdir(screenshots_dir) if f.endswith('.png')])
+                print(f"  Found {len(all_image_files)} png files.")
 
-                    if image_files:  # 如果有图片文件
-                        cat_samples.append({
-                            'instance_id': instance_id,
-                            'category_id': cat_id,
-                            'category_name': self.CATEGORY_MAP[cat_id],
-                            'screenshots_dir': screenshots_dir,
-                            'image_files': image_files,  # 这里已经减少到6张或更少
-                            'model_path': model_path
-                        })
+                r_images = [f for f in all_image_files if f.startswith('screenshots_r_') and f.endswith('.png')]
+                print(f"  Found {len(r_images)} screenshots_r_*.png files.")
+
+                if not r_images:
+                    print(f"  No screenshots_r_XXX.png images, skipping sample.")
+                    continue
+
+                if len(r_images) > 6:
+                    step = len(r_images) // 6
+                    image_files = r_images[::step][:6]
                 else:
-                    print(f"Debug - Screenshots directory not found: {screenshots_dir}")
+                    image_files = r_images
+
+                if image_files:
+                    print(f"  Using {len(image_files)} images for this sample.")
+                    cat_samples.append({
+                        'instance_id': instance_id,
+                        'category_id': cat_id,
+                        'category_name': self.CATEGORY_MAP[cat_id],
+                        'screenshots_dir': screenshots_dir,
+                        'image_files': image_files,
+                        'model_path': model_path
+                    })
+
+            # for instance_id in tqdm(instance_dirs, desc=f"Loading {self.CATEGORY_MAP[cat_id]}"):
+            #     # 更新screenshots目录的路径
+            #     screenshots_dir = os.path.join(cat_dir, instance_id, 'screenshots')
+            #
+            #     # 更新模型文件路径为PLY文件
+            #     model_path = os.path.join(cat_dir, instance_id, 'models', 'model_normalized.ply')
+            #
+            #     if os.path.exists(screenshots_dir):
+            #         # 获取所有png文件
+            #         all_image_files = sorted([f for f in os.listdir(screenshots_dir)
+            #                                   if f.endswith('.png')])
+            #
+            #         # 从24张图像中均匀选择6张
+            #         if len(all_image_files) > 6:
+            #             # 计算采样间隔，确保均匀采样
+            #             step = len(all_image_files) // 6
+            #             image_files = all_image_files[::step][:6]  # 取步长为step的6张图像
+            #         else:
+            #             image_files = all_image_files  # 如果图像少于6张，使用全部
+            #
+            #         if image_files:  # 如果有图片文件
+            #             cat_samples.append({
+            #                 'instance_id': instance_id,
+            #                 'category_id': cat_id,
+            #                 'category_name': self.CATEGORY_MAP[cat_id],
+            #                 'screenshots_dir': screenshots_dir,
+            #                 'image_files': image_files,  # 这里已经减少到6张或更少
+            #                 'model_path': model_path
+            #             })
+            #     else:
+            #         print(f"Debug - Screenshots directory not found: {screenshots_dir}")
 
             samples.extend(cat_samples)
             print(f"Loaded {len(cat_samples)} samples for category {self.CATEGORY_MAP[cat_id]}")
@@ -264,6 +303,75 @@ class ShapeNetDataset(Dataset):
 
         return samples
 
+    def _load_samples(self, split):
+        """加载数据样本，并限制每个实例的图像数量"""
+        samples = []
+        pattern = re.compile(r'^screenshots_r_\d+\.png$')  # 只匹配 screenshots_r_数字.png 格式
+
+        for cat_id in self.categories:
+            cat_samples = []
+            cat_dir = os.path.join(self.root, 'ShapeNetCore.v2', 'ShapeNetCore.v2', cat_id)
+
+            print(f"\nDebug - Checking category directory: {cat_dir}")
+
+            if not os.path.exists(cat_dir):
+                print(f"Warning: Category directory {cat_dir} not found")
+                continue
+
+            # 直接列出类别目录下的所有实例目录（顺序遍历）
+            instance_dirs = [d for d in sorted(os.listdir(cat_dir))
+                             if os.path.isdir(os.path.join(cat_dir, d))]
+            print(f"Debug - Found {len(instance_dirs)} instance directories")
+
+            # 目标样本数
+            target_num = self.samples_per_category if self.samples_per_category is not None else len(instance_dirs)
+
+            for instance_id in tqdm(instance_dirs, desc=f"Loading {self.CATEGORY_MAP[cat_id]}"):
+                if len(cat_samples) >= target_num:
+                    # 已经找到足够样本，停止继续遍历
+                    break
+
+                screenshots_dir = os.path.join(cat_dir, instance_id,) # 'screenshots')
+                model_path = os.path.join(cat_dir, instance_id, 'models', 'model_normalized.ply')
+
+                print(f"Checking instance: {instance_id}")
+                print(f"  screenshots_dir: {screenshots_dir}")
+                if not os.path.exists(screenshots_dir):
+                    print(f"  Screenshots directory NOT found.")
+                    continue
+
+                all_image_files = sorted([f for f in os.listdir(screenshots_dir) if f.endswith('.png')])
+                print(f"  Found {len(all_image_files)} png files.")
+
+                # 只保留严格匹配 screenshots_r_数字.png 格式的图片
+                r_images = [f for f in all_image_files if pattern.match(f)]
+                print(f"  Found {len(r_images)} screenshots_r_XXX.png files.")
+
+                if not r_images:
+                    print(f"  No screenshots_r_XXX.png images, skipping sample.")
+                    continue
+
+                # 使用所有符合条件的图片（不再采样）
+                image_files = r_images
+
+                if image_files:
+                    print(f"  Using {len(image_files)} images for this sample.")
+                    cat_samples.append({
+                        'instance_id': instance_id,
+                        'category_id': cat_id,
+                        'category_name': self.CATEGORY_MAP[cat_id],
+                        'screenshots_dir': screenshots_dir,
+                        'image_files': image_files,
+                        'model_path': model_path
+                    })
+
+            samples.extend(cat_samples)
+            print(f"Loaded {len(cat_samples)} samples for category {self.CATEGORY_MAP[cat_id]}")
+
+        if len(samples) == 0:
+            raise RuntimeError("No samples found in the dataset! Please check the data directory structure.")
+
+        return samples
     def __len__(self):
         """返回数据集大小"""
         return len(self.all_samples)
@@ -342,23 +450,20 @@ class ShapeNetDataset(Dataset):
             points = mesh.sample(num_points)
             points = torch.tensor(points, dtype=torch.float32)
 
-            # 添加数值稳定性检查
-            center = points.mean(dim=0)
-            points = points - center
+            # 使用bounding box归一化
+            bbox = mesh.bounding_box.bounds.astype(np.float32)
+            center = torch.from_numpy((bbox[0] + bbox[1]) / 2).to(points.device).float()
+            scale = float(((bbox[1] - bbox[0]).max() / 2))
+            scale = max(scale, 1e-6)
+            points = (points - center) / scale
 
-            # 防止除零
-            scale = points.abs().max().item()
-            scale = max(scale, 1e-6)  # 添加epsilon
-            points = points / scale
-
-            # 添加验证
             assert not torch.isnan(points).any(), "NaN detected in points"
             assert not torch.isinf(points).any(), "Inf detected in points"
 
             return points
         except Exception as e:
             print(f"Error sampling points: {e}")
-            return torch.randn((num_points, 3), dtype=torch.float32) * 0.1  # 返回随机点云而不是零
+            return torch.randn((num_points, 3), dtype=torch.float32) * 0.1
 
     def get_category_statistics(self):
         """获取数据集类别统计信息"""

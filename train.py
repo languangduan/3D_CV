@@ -171,6 +171,7 @@ class CLIPNeRFTrainer(pl.LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
+        epoch = self.current_epoch
         self.train()
         images = batch['image']
         target_points = batch['points']
@@ -203,7 +204,24 @@ class CLIPNeRFTrainer(pl.LightningModule):
 
             # 计算密度和特征
             try:
-                densities, features = self.model.implicit_field.compute_density_and_features(points, fused_features)
+                if epoch is None:
+                    positional_encoding_weight = 1.0
+                else:
+                    if epoch < self.model.implicit_field.positional_encoding_start_epoch:
+                        positional_encoding_weight = 0.0
+                    elif (epoch < self.model.implicit_field.positional_encoding_start_epoch +
+                          self.model.implicit_field.positional_encoding_ramp):
+                        # 线性插值
+                        positional_encoding_weight = ((epoch - self.model.implicit_field.positional_encoding_start_epoch)
+                                                      / self.model.implicit_field.positional_encoding_ramp)
+                    else:
+                        positional_encoding_weight = 1.0
+
+                densities, features = self.model.implicit_field.compute_density_and_features(
+                    points, fused_features, positional_encoding_weight=positional_encoding_weight
+                )
+
+                # densities, features = self.model.implicit_field.compute_density_and_features(points, fused_features)
                 # print(f"Step 4: Densities and features computed, shapes: {densities.shape}, {features.shape}")
 
                 # 检查密度和特征
@@ -1699,7 +1717,7 @@ def main():
         'samples_per_category': 200,
         'mesh_eval_frequency': 5,
         'early_stop_patience': 10,
-        'gpu': 0
+        'gpu': 3
     })
 
     # 创建训练器

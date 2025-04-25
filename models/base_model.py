@@ -45,10 +45,10 @@ class SingleViewReconstructor(nn.Module):
         self.implicit_field.requires_grad_(True)
 
         # 4. 体积渲染器
-        self.volume_renderer = VolumeRenderer(
-            num_samples=32,
-            ray_step_size=0.02
-        )
+        # self.volume_renderer = VolumeRenderer(
+        #     num_samples=32,
+        #     ray_step_size=0.02
+        # )
 
         # 初始化权重
         self._init_weights()

@@ -13,6 +13,8 @@ from losses.regularization_loss import RegularizationLoss
 class CombinedLoss(nn.Module):
     def __init__(self, cfg):
         super().__init__()
+
+        self.train_stage = getattr(cfg, 'train_stage', 1)
         # 原始损失权重设置
         self.lambda_chamfer = getattr(cfg, 'lambda_chamfer', 0.5)
         self.lambda_density = getattr(cfg, 'lambda_density', 1.0)
@@ -107,7 +109,7 @@ class CombinedLoss(nn.Module):
 
         return normalized_weight
 
-    def forward(self, outputs, targets, model=None):
+    def forward(self, outputs, targets, model=None, epoch=None):
         """
         计算点云级别的损失
         Args:
@@ -125,6 +127,25 @@ class CombinedLoss(nn.Module):
 
         if 'pred_densities' not in outputs:
             raise KeyError("Missing required key: 'pred_densities'")
+
+        stage = self.train_stage
+        if epoch is not None:
+            if epoch < 10:  # 例如前30轮为第一阶段
+                stage = 1
+            else:
+                stage = 2
+
+        # 阶段一：只用基础损失
+        if stage == 1:
+            use_clip = False
+            use_edge = False
+            use_depth = False
+            lambda_reg = self.lambda_reg * 0.2  # 可减小正则权重
+        else:
+            use_clip = self.use_clip
+            use_edge = self.use_edge_aware
+            use_depth = self.use_depth
+            lambda_reg = self.lambda_reg
 
         # Chamfer距离损失
         try:
@@ -160,7 +181,7 @@ class CombinedLoss(nn.Module):
 
         # 边缘感知损失
         edge_loss = torch.tensor(0.0, device=outputs['pred_points'].device)
-        if self.use_edge_aware:
+        if use_edge:
             try:
                 # 获取原始图像（如果有）
                 images = outputs.get('original_images', None)
@@ -185,9 +206,8 @@ class CombinedLoss(nn.Module):
                 raw_losses['edge'] = 0.02  # 使用默认值
 
         # CLIP损失
-        # CLIP损失
         clip_loss = torch.tensor(0.0, device=outputs['pred_points'].device)
-        if self.use_clip:
+        if use_clip:
             try:
                 if 'text_prompts' in targets:
                     # 使用改进的CLIP损失，直接传递点云和法线
@@ -225,7 +245,7 @@ class CombinedLoss(nn.Module):
 
         # 深度一致性损失
         depth_loss = torch.tensor(0.0, device=outputs['pred_points'].device)
-        if self.use_depth:
+        if use_depth:
             try:
                 if 'original_images' in outputs:
                     # 传递法线信息到深度一致性损失
